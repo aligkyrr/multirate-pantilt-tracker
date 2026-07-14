@@ -222,9 +222,9 @@ The project includes concrete, fully parametrized implementations of:
 
 ---
 
-## Author
+## Developer
 
-**Ali İhsan Gökyer**
+**Ali İhsan GÖKYER**
 Electrical-Electronics Engineering Student
 
 ---

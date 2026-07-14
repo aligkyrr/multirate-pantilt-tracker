@@ -224,7 +224,7 @@ Proje şunların somut, tamamen parametrize edilmiş uygulamalarını içerir:
 
 ## Geliştirici
 
-**Ali İhsan Gökyer**
+**Ali İhsan GÖKYER**
 Elektrik-Elektronik Mühendisliği Öğrencisi
 
 ---
