@@ -2,6 +2,7 @@ import math
 import random
 
 import config
+from .kalman import CVKalmanFilter2D
 
 
 class Target:
@@ -23,6 +24,17 @@ class Target:
 
         self._retarget_timer = random.uniform(0.5, 1.5)
         self._drift_angle = angle0
+
+        r_pos = 0.02 ** 2  # ~2 cm ölçüm belirsizliği (pratikte "gürültüsüz")
+        q_pos = 0.01
+        q_vel = (config.TARGET_NOISE_SCALE[self.type] ** 2) / max(config.TARGET_ACCEL_DAMPING, 0.1)
+
+        self._kf = CVKalmanFilter2D(
+            px=self.x, py=self.y, vx=self.vx, vy=self.vy,
+            p0_pos=0.1, p0_vel=(vmax ** 2),
+            q_pos=q_pos, q_vel=q_vel,
+            r_pos=r_pos,
+        )
 
     # ------------------------------------------------------------
     def step(self, dt: float):
@@ -59,6 +71,8 @@ class Target:
 
         self._bounce(config.MAP_BOUNDS)
 
+        self._kf.step(dt, self.x, self.y)
+
     def _bounce(self, bounds):
         xmin, xmax, ymin, ymax = bounds
         damp = config.TARGET_BOUNCE_DAMPING
@@ -81,8 +95,10 @@ class Target:
             self.vy = -self.vy * damp
             self._drift_angle = -self._drift_angle
 
-    def predicted_position(self, lead_time: float):
-        return self.x + self.vx * lead_time, self.y + self.vy * lead_time
+    def predicted_position(self, lead_time: float = None):
+        if lead_time is None:
+            lead_time = config.LEAD_TIME_SEC
+        return self._kf.predicted_position(lead_time)
 
     def distance_to_origin(self) -> float:
         return math.hypot(self.x, self.y)
