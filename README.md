@@ -1,13 +1,13 @@
 # Multi-Rate Pan-Tilt Target Tracking System
 
 **A real-time, multi-rate control simulation of a two-axis pan-tilt tracking platform.**
-PyQt5-based UI, OpenGL 3D visualization, and closed-loop PID control.
+PyQt5-based UI, OpenGL 3D visualization, closed-loop PID control, and Kalman-filter-based target state estimation.
 
 ---
 
 ## Overview
 
-This project is a control and simulation system that models a two-axis (azimuth / elevation) pan-tilt platform tracking moving targets in real time. The goal is not a visual demo — it's an accurate software-level model of the problems real-time tracking systems actually face: synchronizing subsystems running at different frequencies, closed-loop control stability, chatter-free mode/lock transitions, and target loss / re-acquisition behavior.
+This project is a control and simulation system that models a two-axis (azimuth / elevation) pan-tilt platform tracking moving targets in real time. The goal is not a visual demo — it's an accurate software-level model of the problems real-time tracking systems actually face: synchronizing subsystems running at different frequencies, closed-loop control stability, chatter-free mode/lock transitions, target state estimation under measurement noise, and target loss / re-acquisition behavior.
 
 The system is built on three independent fixed-timestep loops and is fully parametrized through `config.py`; no control or timing constant is hardcoded anywhere in the codebase.
 
@@ -38,7 +38,7 @@ PID_DERIVATIVE_FILTER_ALPHA = 0.25
 
 - **Anti-windup:** the integral term is clamped at `PID_INTEGRAL_LIMIT` so sustained large errors can't drive integral saturation and destabilize the controller.
 - **Derivative filtering:** small noise from the target's random-walk motion can get amplified by the D term and show up as jitter in motor output. The derivative term is therefore low-pass filtered (`α = 0.25`).
-- **Target lead / prediction:** rather than aiming at the target's instantaneous position, the controller aims at a position projected `LEAD_TIME_SEC = 0.35s` ahead using the target's `vx, vy` — a standard technique for reducing phase lag against moving targets.
+- **Target lead / prediction:** rather than aiming at the target's instantaneous position, the controller aims at a position projected `LEAD_TIME_SEC = 0.35s` ahead, computed from the target's Kalman-filtered velocity estimate (see below) — a standard technique for reducing phase lag against moving targets.
 
 ### Coarse/Fine Mode Switching and Lock-On Logic
 
@@ -58,6 +58,24 @@ Using both mechanisms together mirrors the approach real radar/tracking systems 
 ### Acceleration Limiting
 
 If the PID/coarse output were applied to the angle directly, velocity could jump instantaneously from one tick to the next — something a real servo motor physically cannot do. To account for this, the rate of change of velocity is separately capped (`MAX_ACCEL_AZ/EL_DEFAULT_DEG_S2 = 150.0°/s²`), configurable independently per axis and adjustable at runtime from the UI. This is a post-processing step applied **after** the coarse/fine velocity computation and **immediately before** integrating it into the angle.
+
+### Target State Estimation — Constant-Velocity Kalman Filter
+
+Each `Target` carries its own 2D Kalman filter (`core/kalman.py`, `CVKalmanFilter2D`) with state `[px, py, vx, vy]` and a constant-velocity process model. The filter is deliberately dependency-free (pure Python, no NumPy) — the 4×4 covariance propagation and 2×2 innovation-covariance inversion are written out explicitly, so the module has zero external requirements.
+
+```
+predict:  x_k = F x_{k-1}                  (constant-velocity model)
+          P_k = F P_{k-1} F^T + Q
+update:   y   = z - H x_k                   (innovation)
+          S   = H P_k H^T + R
+          K   = P_k H^T S^{-1}
+          x_k = x_k + K y
+          P_k = (I - K H) P_k
+```
+
+`Target.step()` feeds the filter with the ground-truth position each tick as the "measurement," and `predicted_position(lead_time)` extrapolates from the filter's state estimate rather than from raw instantaneous velocity. Process noise (`q_vel`) is scaled per target profile from `TARGET_NOISE_SCALE` / `TARGET_ACCEL_DAMPING`, so an `aggressive` target's filter trusts new velocity information faster (less lag, more responsive to maneuvers) while a `slow` target's filter smooths more aggressively.
+
+This is designed as the estimation layer the system will sit on top of once the planned YOLO-based vision input replaces the simulated ground-truth target position — see [Results](#results) for why that matters.
 
 ---
 
@@ -84,12 +102,15 @@ The project uses a layered architecture with a strict one-way dependency (UI →
 
 ```
 pantilt_tracker/
-├── core/              # Control loop, PID, target/route logic, state machine
-├── ui/                # PyQt5 interface layer — see module breakdown below
-├── visualization/      # OpenGL-based 3D render pipeline
-├── models/             # STL 3D model assets (servo, camera, brackets)
-├── config.py           # All system/control parameters (single source of truth)
-└── main.py             # Application entry point
+├── core/
+│   ├── kalman.py       # CVKalmanFilter2D — constant-velocity Kalman filter (dependency-free)
+│   ├── target.py        # Target physics, target-side state estimation, TargetManager
+│   └── ...               # Control loop, PID, route logic, state machine
+├── ui/                 # PyQt5 interface layer — see module breakdown below
+├── visualization/       # OpenGL-based 3D render pipeline
+├── models/              # STL 3D model assets (servo, camera, brackets)
+├── config.py            # All system/control parameters (single source of truth)
+└── main.py              # Application entry point
 ```
 
 ### `ui/` Module Breakdown
@@ -129,6 +150,7 @@ Highlights of this breakdown:
 - **Drawing, coordinate transforms, and interaction live in separate files inside `radar_widget`** — instead of one "god widget," each concern has its own file, so a change to drawing style (`style.py`) can be made without touching interaction logic (`interaction.py`).
 - **In `control_panel`, UI interaction logic (`interactions.py`) is separated from the outward-facing API (`api.py`)** — how the panel talks to `core` is managed from a single point, isolating the blast radius of any interface change on the `core` side to one file.
 - **`main_window/loop.py`** is the layer that wires the multi-rate simulation loop into Qt's event loop (`QTimer`, `TICK_MS = 4`) — the bridge between simulation timing and the UI thread is isolated here.
+- **`core/kalman.py` is isolated from `core/target.py`** — the filter is a general-purpose, target-agnostic module with no knowledge of `config.py` or target profiles; `target.py` owns the domain-specific tuning (how process noise maps to target type).
 
 ---
 
@@ -137,6 +159,32 @@ Highlights of this breakdown:
 - **2D Radar (`radar_widget`):** targets, active-target highlighting, lock ring, aim-line, route/waypoint rendering, and a real-time HUD overlay
 - **3D Scene (OpenGL):** STL-model-based pan-tilt mechanism (servo brackets, camera assembly), real-time rotation about the pan/tilt pivots, laser/aim-line simulation
 - **Telemetry plots:** angular error and velocity, over a `WINDOW = 100`-sample rolling window with a `TRAIL = 50`-sample trace
+
+---
+
+## Results
+
+Two benchmarks were run to validate the target-lead prediction pipeline, comparing naive extrapolation (`position + velocity * LEAD_TIME_SEC`) against the CV Kalman filter's `predicted_position()`, measured as RMSE against each target's actual future position, `LEAD_TIME_SEC = 0.35s` ahead, over 3000 ticks at `DT_TARGET`.
+
+**1. Noiseless ground-truth input** (current state of the simulation — `Target.step()` feeds the filter its own exact position):
+
+| Target profile | Naive RMSE | Kalman RMSE |
+|---|---|---|
+| normal | 0.175 m | 0.201 m |
+| aggressive | 0.445 m | 0.489 m |
+| slow | 0.050 m | 0.063 m |
+
+Naive extrapolation is marginally *better* here — expected, since the filter is smoothing a velocity signal that already has zero measurement noise to remove, so the smoothing itself becomes a small lag cost. This confirms the filter isn't buying anything when the input is already ground truth.
+
+**2. Simulated noisy position measurement** (`σ = 0.15 m`, modeling the accuracy of a vision-based detector like the planned YOLO input, where velocity is *not* directly observable and must be estimated from successive noisy position readings):
+
+| Target profile | Finite-difference RMSE | Kalman RMSE | Improvement |
+|---|---|---|---|
+| normal | 6.465 m | 0.356 m | 94.5% |
+| aggressive | 6.443 m | 0.787 m | 87.8% |
+| slow | 6.442 m | 0.181 m | 97.2% |
+
+The gap is stark because differentiating two noisy position samples over one tick (`Δt = 1/60s`) amplifies measurement noise by `1/Δt`, turning a 15 cm position error into a multi-m/s velocity error. This is precisely the regime the planned vision-based input will operate in, and it's the reason the Kalman filter is built into the estimation layer now rather than retrofitted later.
 
 ---
 
@@ -158,6 +206,7 @@ The project includes concrete, fully parametrized implementations of:
 - Multi-rate real-time system design (independent-Hz sub-loops, fixed-dt integration, spiral-of-death protection)
 - Closed-loop PID control design (anti-windup, derivative filtering, target lead/prediction)
 - State-machine stability via hysteresis + debounce (chatter prevention)
+- Target state estimation via a dependency-free constant-velocity Kalman filter, with per-profile noise tuning
 - Actuator simulation modeling physical constraints (velocity/acceleration limits)
 - Automatic target selection with flip-flop prevention in a multi-target environment
 - Layered, single-responsibility modular software architecture (particularly the sub-packages under `ui/`)
@@ -167,8 +216,7 @@ The project includes concrete, fully parametrized implementations of:
 
 ## Planned Improvements
 
-- Real-time target detection via YOLO (vision-based input)
-- Target state estimation via Kalman filtering
+- Real-time target detection via YOLO (vision-based input) — will feed the existing `CVKalmanFilter2D` estimation layer with real, noisy measurements instead of simulated ground truth
 - Hardware integration (servo motor driver / Raspberry Pi deployment)
 - Network-based remote control interface
 
