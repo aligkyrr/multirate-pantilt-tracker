@@ -219,17 +219,6 @@ class _ControlPanelSectionsMixin:
         status_row.addStretch(1)
         layout.addLayout(status_row)
 
-        btn_row = QHBoxLayout()
-        self.btn_pause = QPushButton("Pause")
-        self.btn_reset = QPushButton("Reset")
-        self.btn_pause.clicked.connect(self.pauseClicked.emit)
-        self.btn_reset.clicked.connect(self.resetClicked.emit)
-        btn_row.addWidget(self.btn_pause)
-        btn_row.addWidget(self.btn_reset)
-        layout.addLayout(btn_row)
-
-        layout.addStretch(1)
-
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMinimumHeight(120)

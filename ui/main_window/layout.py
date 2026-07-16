@@ -1,6 +1,9 @@
 from PyQt5.QtWidgets import QWidget, QHBoxLayout, QTabWidget
 import config
 
+from ..control_panel.hardware_panel import HardwareProfilePanel
+
+
 class _LayoutMixin:
     def _build_layout(self):
         central = QWidget()
@@ -61,8 +64,52 @@ class _LayoutMixin:
 
         center_tabs.tabBar().setFixedHeight(40)
         center_tabs.tabBar().setDrawBase(False)
-        
-        root.addWidget(self.control_panel, 22)
+
+        tracker = getattr(self, "tracker", None)
+        self.hardware_panel = HardwareProfilePanel(tracker=tracker)
+
+        self.sidebar_tabs = QTabWidget()
+        self.sidebar_tabs.setTabPosition(QTabWidget.North)
+        self.sidebar_tabs.addTab(self.control_panel, "Kontrol")
+        self.sidebar_tabs.addTab(self.hardware_panel, "Donanım Profili")
+
+        self.sidebar_tabs.setStyleSheet(f"""
+        QTabWidget {{
+            background: {config.COLOR_BG};
+            border: none;
+        }}
+
+        QTabWidget::pane {{
+            border: 1px solid {config.COLOR_GRID};
+            border-radius: 10px;
+            background-color: {config.COLOR_PANEL_BG};
+            margin-top: 8px;
+        }}
+
+        QTabBar::tab {{
+            background: {config.COLOR_PANEL_BG};
+            color: #9aa4ad;
+            padding: 8px 18px;
+            margin-right: 6px;
+            border-top-left-radius: 8px;
+            border-top-right-radius: 8px;
+            font-weight: 600;
+            min-width: 120px;
+        }}
+
+        QTabBar::tab:selected {{
+            background: {config.COLOR_BG};
+            color: {config.COLOR_TEXT};
+            border-bottom: 3px solid {config.COLOR_ACCENT};
+        }}
+
+        QTabBar::tab:hover {{
+            background: #1c2128;
+            color: {config.COLOR_TEXT};
+        }}
+        """)
+
+        root.addWidget(self.sidebar_tabs, 22)
         root.addWidget(center_tabs, 48)
         root.addWidget(self.graphs, 30)
 

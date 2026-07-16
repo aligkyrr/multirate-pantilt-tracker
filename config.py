@@ -172,6 +172,99 @@ ACCEL_LIMIT_MIN_DEG_S2 = 10.0
 ACCEL_LIMIT_MAX_DEG_S2 = 2000.0
 
 # ==================================================================
+# DONANIM GERÇEKÇİLİK PROFİLİ (Hardware Realism Profile)
+# ==================================================================
+# Bu blok, gerçek bir pan-tilt cihazının fiziksel/elektromekanik
+# kısıtlarını ve kusurlarını simüle etmek için kullanılır. Amaç,
+# "ideal" bir simülasyon yerine gerçek donanımda karşılaşılacak
+# sınırları (hız zarfı, ivme, açı limiti) ve kusurları (hız
+# dalgalanması, çözünürlük, doğruluk, tekrarlanabilirlik, yerleşme
+# süresi) modellemektir. Bkz. `pantilt_hardware.py`.
+
+HARDWARE_REALISM_ENABLED_DEFAULT = False
+
+# ---- Azimuth hız zarfı ----
+# AZ_MIN_SPEED_DEG_S: bu değerin altındaki komutlanmış hızlarda motor
+# "stiction" (statik sürtünme) nedeniyle düzgün hareket edemez ve durur.
+AZ_MIN_SPEED_DEG_S = 0.3
+AZ_MAX_SPEED_DEG_S = 60.0
+
+# ---- Azimuth açı sınırı ----
+# AZ_LIMIT_ENABLED=False -> sürekli/sınırsız dönüş (slip-ring vb.)
+# AZ_LIMIT_ENABLED=True  -> kablo dolanmasını önlemek için yazılımsal
+# sert sınır (ör. çoğu pan-tilt üniteside +-185 derece civarı, 360
+# derecelik tam turdan biraz fazla kablo payı bırakır).
+AZ_LIMIT_ENABLED = True
+AZ_LIMIT_MIN_DEG = -185.0
+AZ_LIMIT_MAX_DEG = 185.0
+
+# ---- Elevation hız zarfı ----
+EL_MIN_SPEED_DEG_S = 0.3
+EL_MAX_SPEED_DEG_S = 45.0
+
+# ---- Elevation açı sınırı ----
+# Elevation'da genelde "sınırsız" seçenek yoktur (mekanik olarak
+# şasiye çarpar), bu yüzden AZ'nin aksine burada bir enable flag'i yok.
+EL_LIMIT_MIN_DEG = -75.0
+EL_LIMIT_MAX_DEG = 75.0
+
+# ---- İvme sınırları (mevcut ACCEL_LIMIT_* ile aynı fiziksel anlamda,
+# donanım profilinin kendi başına tutarlı olması için burada da
+# tekrar tanımlanıyor -- istenirse tek bir kaynağa indirgenebilir) ----
+AZ_MAX_ACCEL_DEG_S2 = MAX_ACCEL_AZ_DEFAULT_DEG_S2
+EL_MAX_ACCEL_DEG_S2 = MAX_ACCEL_EL_DEFAULT_DEG_S2
+
+# ---- Haberleşme komut güncelleme hızı ----
+# Cihazın kabul ettiği azami komut hızı (Hz). Bu hızdan daha sık komut
+# gönderilirse (ör. UI/kontrol döngüsü 120 Hz'de çalışırken cihaz
+# sadece 50 Hz kabul ediyorsa), aradaki fazla komutlar cihaz tarafından
+# KAÇIRILIR (drop edilir) -- son kabul edilen komut yürütülmeye devam
+# eder. Gerçek seri/CAN/RS485 haberleşmeli servo sürücülerde tipik bir
+# kısıttır.
+COMM_MAX_COMMAND_RATE_HZ = 50.0
+
+# ---- Hız dalgalanması (velocity ripple) ----
+# Cihaz komutlanan hıza "oturmaya" çalışırken kendi iç kontrolcüsü
+# (genelde ucuz bir PID veya bang-bang sürücü) küçük, rastgele bir
+# dalgalanma üretir. Bu, TÜM gerçek servo/step motor sürücülerinde
+# görülen bir olgudur. Burada bir smooth-random-walk (OU tipi) gürültü
+# olarak modellenir ve *_RIPPLE_MAX_DEG_S ile genliği sınırlanır.
+AZ_VELOCITY_RIPPLE_MAX_DEG_S = 0.8
+EL_VELOCITY_RIPPLE_MAX_DEG_S = 0.6
+VELOCITY_RIPPLE_DAMPING = 6.0   # büyük değer -> dalgalanma daha çabuk sönümlenir/yön değiştirir
+
+# ---- Açı çözünürlüğü (encoder/step çözünürlüğü) ----
+# Cihazın açıyı raporlayabildiği en küçük adım. Gerçek konum bu
+# çözünürlüğe yuvarlanarak "okunur" (quantization).
+AZ_ANGULAR_RESOLUTION_DEG = 0.01
+EL_ANGULAR_RESOLUTION_DEG = 0.01
+
+# ---- Konum doğruluğu (accuracy) ----
+# Cihazın kalibrasyon/mekanik toleransından kaynaklanan SABİT
+# (sistematik) hata payı. Her eksende cihaz açılışında rastgele
+# ama sabit bir bias olarak çekilir (gerçek cihazlarda kalibrasyon
+# hatası oturumlar arası değişebilir ama bir oturum içinde sabittir).
+AZ_POSITION_ACCURACY_DEG = 0.05
+EL_POSITION_ACCURACY_DEG = 0.05
+
+# ---- Tekrarlanabilirlik (repeatability) ----
+# Aynı komutlanmış açıya defalarca gidildiğinde, her seferinde biraz
+# farklı bir gerçek konumda durma payı (backlash, dişli boşluğu vb.).
+# Accuracy'den farklı olarak bu RASTGELE ve her ölçümde yeniden çekilir.
+AZ_POSITION_REPEATABILITY_DEG = 0.02
+EL_POSITION_REPEATABILITY_DEG = 0.02
+
+# ---- Yerleşme süresi (settling time) ----
+# Eksen, komutlanan hız sıfıra indikten sonra ne kadar sürede
+# SETTLING_BAND_DEG içine girip orada kalıyor (kısa süreli
+# creep/salınım sonrası tam durma). Gerçek servo sistemlerinde
+# görülen bir davranıştır ve lock-on mantığının ne kadar "temkinli"
+# davranması gerektiğini etkiler.
+AZ_SETTLING_TIME_SEC = 0.25
+EL_SETTLING_TIME_SEC = 0.20
+SETTLING_BAND_DEG = 0.1
+
+# ==================================================================
 # Log paneli
 # ==================================================================
 MAX_LOG_LINES = 10
