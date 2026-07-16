@@ -59,6 +59,27 @@ Bu iki mekanizmanın birlikte kullanılması, gerçek radar/takip sistemlerinin 
 
 PID/coarse çıktısı doğrudan açıya uygulansaydı, hız bir tick'ten diğerine anlık olarak sıçrayabilirdi — gerçek bir servo motorun fiziksel olarak yapamayacağı bir şey. Bunu hesaba katmak için hızın değişim oranı ayrıca sınırlanır (`MAX_ACCEL_AZ/EL_DEFAULT_DEG_S2 = 150.0°/s²`), her eksen için bağımsız olarak yapılandırılabilir ve arayüzden çalışma zamanında ayarlanabilir. Bu, coarse/fine hız hesaplamasından **sonra** ve açıya entegre edilmeden **hemen önce** uygulanan bir son-işlem adımıdır.
 
+### Donanım Gerçekçilik Katmanı
+
+Kontrol mantığının ("ideal" açı/hız/ivme entegrasyonu) üzerine, gerçek bir pan-tilt cihazının fiziksel/elektromekanik kısıtlarını ve kusurlarını modelleyen bağımsız bir katman (`core/pantilt_hardware.py`) eklenmiştir. Katman `simulator.py` ve `target.py`'a bağımlı değildir — tek yönlü, temiz bir sınır. Çalışma zamanında `HARDWARE_REALISM_ENABLED_DEFAULT` bayrağıyla açılıp kapatılabilir; kapalıyken sistem, bu katman eklenmeden önceki orijinal ideal simülasyonla birebir aynı davranır (geriye dönük uyumluluk).
+
+Modellenen efektler, her eksen (AZ/EL) için bağımsız olarak yapılandırılabilir:
+
+- **Hız zarfı:** `AZ/EL_MIN_SPEED_DEG_S` altındaki komutlanmış hızlarda motor stiction (statik sürtünme) nedeniyle hareket edemez ve durur; `MAX_SPEED_DEG_S` üst hız tavanıdır.
+- **Açı sınırı:** `AZ_LIMIT_ENABLED` açıkken azimuth ekseni kablo dolanmasını önlemek için `AZ_LIMIT_MIN/MAX_DEG = ±185°`'de sert stop yapar (limit switch'e çarpıp orada durur, sekmez). Elevation'da mekanik olarak zaten sınırsız bir seçenek yoktur.
+- **İvme sınırı:** `AZ/EL_MAX_ACCEL_DEG_S2` — donanım katmanı kendi ivme sınırını uyguladığından, bu katman açıkken tracker'ın kendi ivme sınırlayıcısı devre dışı bırakılır (aksi halde ivme iki kez sınırlanmış olurdu).
+- **Haberleşme komut hızı sınırı:** `COMM_MAX_COMMAND_RATE_HZ = 50 Hz` — kontrol döngüsü 120 Hz'de komut üretse de, cihaz bu hızdan daha sık komut kabul etmez; aradaki komutlar kaçırılır (drop edilir), son kabul edilen komut yürütülmeye devam eder. Gerçek seri/CAN/RS485 haberleşmeli servo sürücülerde tipik bir kısıttır.
+- **Hız dalgalanması (velocity ripple):** cihazın kendi iç kontrolcüsünün (ucuz PID/bang-bang sürücü) ürettiği küçük rastgele dalgalanma; OU-tipi smooth-random-walk gürültüsüyle modellenir (`AZ/EL_VELOCITY_RIPPLE_MAX_DEG_S`).
+- **Açısal çözünürlük:** encoder/step çözünürlüğü (`AZ/EL_ANGULAR_RESOLUTION_DEG`) — cihazın raporladığı konum bu adıma yuvarlanır (quantization).
+- **Konum doğruluğu (accuracy) ve tekrarlanabilirlik (repeatability):** accuracy oturum başına sabit bir kalibrasyon bias'ıdır; repeatability ise backlash/dişli boşluğu gibi, her okumada yeniden çekilen rastgele hatadır.
+- **Yerleşme süresi (settling time):** eksen, komutlanan hız sıfıra indikten sonra `SETTLING_BAND_DEG` içine girip orada `AZ/EL_SETTLING_TIME_SEC` kadar kesintisiz kalırsa "yerleşmiş" (settled) sayılır; lock-on mantığının ne kadar temkinli davranması gerektiğini etkiler.
+
+İki konum kavramı ayrı tutulur: `true_position_deg` simülasyonun içsel "gerçek" fiziksel konumu, `read_position_deg()` ise cihazın DIŞARIYA raporladığı (çözünürlük + accuracy + repeatability hatası eklenmiş) konumdur — UI/telemetri/kontrol döngüsü daima ikincisini okur.
+
+**Açı-sınırı-farkında (limit-aware) hata çözümü:** Azimuth hatası hesaplanırken naif "en kısa yol" (`±180°`) mantığı yeterli değildir — sert açı sınırı olan bir eksende hedef, pan-tiltin "arkasına" (180° civarından) geçtiğinde en kısa yol sınırın dışına çıkabilir ve eksen limite çarpıp kilitlenir. Bunun yerine `PanTiltTracker._resolve_az_error()`, hedef açının `±360°` eşdeğerleri arasından, `AZ_LIMIT_ENABLED` sınırı içinde kalan ve mevcut konuma en yakın olanı seçer; gerektiğinde bu, kısa yol yerine ters yönden — daha uzun ama fiilen ulaşılabilir yoldan — gitmek anlamına gelir.
+
+Parametreler, `HARDWARE_MENU_SCHEMA` üzerinden otomatik olarak oluşturulan bir PyQt5 paneliyle (`ui/control_panel/hardware_panel.py`, `HardwareProfilePanel`) çalışma zamanında gruplu (Azimuth / Elevation / Haberleşme / Yerleşme) şekilde ayarlanabilir; panel ayrıca cihaz durumunu (settled/hareket halinde) ve komut kaçırma oranını canlı olarak gösteren bir telemetri etiketi içerir.
+
 ### Hedef Durum Kestirimi — Sabit Hız (Constant-Velocity) Kalman Filtresi
 
 Her `Target`, kendi 2D Kalman filtresini taşır (`core/kalman.py`, `CVKalmanFilter2D`) — durum vektörü `[px, py, vx, vy]` ve sabit-hız süreç modeliyle. Filtre bilinçli olarak bağımlılıksız yazıldı (saf Python, NumPy yok) — 4×4 kovaryans yayılımı ve 2×2 innovation-kovaryans tersi elle açık şekilde yazılmıştır, böylece modülün hiçbir dış bağımlılığı yoktur.
@@ -103,8 +124,9 @@ Proje, kontrol mantığını arayüzden tamamen ayıran katmanlı bir mimari (UI
 ```
 pantilt_tracker/
 ├── core/
-│   ├── kalman.py       # CVKalmanFilter2D — sabit-hız Kalman filtresi (bağımlılıksız)
-│   ├── target.py        # Hedef fiziği, hedef tarafı durum kestirimi, TargetManager
+│   ├── kalman.py         # CVKalmanFilter2D — sabit-hız Kalman filtresi (bağımlılıksız)
+│   ├── target.py          # Hedef fiziği, hedef tarafı durum kestirimi, TargetManager
+│   ├── pantilt_hardware.py # Donanım gerçekçilik katmanı (hız/ivme/açı sınırı, ripple, çözünürlük, accuracy/repeatability, settling) — config'e bağımlı, simulator.py/target.py'a bağımsız
 │   └── ...               # Kontrol döngüsü, PID, rota mantığı, durum makinesi
 ├── ui/                  # PyQt5 arayüz katmanı — aşağıdaki modül dökümüne bakın
 ├── visualization/        # OpenGL tabanlı 3D render hattı
@@ -125,7 +147,8 @@ ui/
 │   ├── api.py             # Panelin core'a dışa dönük arayüzü
 │   ├── interactions.py    # Kullanıcı etkileşim mantığı (buton/slider callback'leri)
 │   ├── panel.py           # Panel widget'ının kendisi / layout kurulumu
-│   └── sections.py        # Panel içindeki alt bölümler (PID, rota, hedef, vb.)
+│   ├── sections.py        # Panel içindeki alt bölümler (PID, rota, hedef, vb.)
+│   └── hardware_panel.py  # Donanım gerçekçilik parametreleri paneli (HARDWARE_MENU_SCHEMA'dan otomatik üretilir)
 │
 ├── main_window/           # Ana pencere ve uygulama döngüsü
 │   ├── handlers.py         # Olay/sinyal işleyicileri
@@ -186,6 +209,17 @@ Naif ekstrapolasyon burada hafif *daha iyi* — bu beklenen bir sonuç, çünkü
 
 Fark burada bu kadar büyük çünkü iki gürültülü konum örneğini tek bir tick üzerinden (`Δt = 1/60s`) türevlemek, ölçüm gürültüsünü `1/Δt` kadar büyütüyor — 15 cm'lik bir konum hatası, çok büyük bir hız hatasına dönüşüyor. Bu tam olarak planlanan görüntü-tabanlı girdinin çalışacağı rejim, ve Kalman filtresinin sonradan eklenmek yerine kestirim katmanına şimdiden dahil edilmiş olmasının nedeni budur.
 
+**3. Açı-limiti-farkında (limit-aware) yol çözümü** — sert açı limitli (`AZ_LIMIT_ENABLED=True`, `±185°`) donanım gerçekçilik katmanı açıkken, hedefin platformun tam arkasından (180° civarından) geçtiği bir senaryo `core/pantilt_hardware.PanTiltDeviceSimulator` ile uçtan uca simüle edildi: pan-tilt `+170°`'de, hedef aniden `-170°`'ye geçiyor (des_az her zaman `atan2` ile `±180°` aralığında hesaplandığından bu, hedefin gerçekten arkaya geçtiği her durumda ortaya çıkan gerçek bir durumdur). Coarse-mod hız hesaplaması ve gerçek `PanTiltDeviceSimulator` fiziği (ivme, hız tavanı, sert stop) birebir korunarak, naif `±180°` wrap hatası hesabı ile düzeltilmiş `_resolve_az_error()` (`±360°` eşdeğerleri arasından limit içinde kalan en yakın yolu seçen) karşılaştırıldı, `DT_PANTILT` adımında azami 2000 tick boyunca:
+
+| | Düzeltme öncesi (naif ±180° wrap) | Düzeltme sonrası (`_resolve_az_error`) |
+|---|---|---|
+| Hedefe kilitlenme | ❌ hiçbir zaman (2000 tick boyunca) | ✅ 351 tick (~5,85 s) |
+| Son azimuth | 184,97° (sert limitte asılı kalmış) | -167,41° |
+| Son gerçek açısal hata | 5,03° (kalıcı, sabit) | 2,59° (lock eşiği bandında, salınımlı) |
+| Görülen en küçük hata | 5,01° (limitten hiç kurtulamıyor) | 0,20° |
+
+Düzeltme öncesinde eksen, hedefe giden en kısa (~20°) yolun sınırın (`185°`) dışına çıkması nedeniyle limit switch'e çarpıp orada kilitli kalıyor ve hedefe **bir daha asla ulaşamıyor** — hata kalıcı olarak ~5°'de sabitleniyor. Düzeltme sonrasında sistem, hedefin `±360°` eşdeğerleri arasından limit içinde kalan (`-170°`, yani mevcut konumdan `-340°`'lik "uzun ama ulaşılabilir" yoldan) hedefi seçiyor ve pratikte hedefe tamamen kilitleniyor.
+
 ---
 
 ## Kurulum
@@ -208,6 +242,7 @@ Proje şunların somut, tamamen parametrize edilmiş uygulamalarını içerir:
 - Histerezis + debounce ile durum-makinesi kararlılığı (titreme önleme)
 - Bağımlılıksız sabit-hız Kalman filtresi ile hedef durum kestirimi, profil bazlı gürültü kalibrasyonuyla
 - Fiziksel kısıtları modelleyen aktüatör simülasyonu (hız/ivme sınırları)
+- Bağımsız bir donanım gerçekçilik katmanı: hız zarfı, sert açı limiti, haberleşme komut kaçırma, hız dalgalanması, encoder çözünürlüğü, accuracy/repeatability, yerleşme süresi — ve buna eşlik eden, sert açı limitli bir eksende hedefin platformun arkasına geçtiği durumlarda limitte kilitlenmeyi önleyen limit-farkında (limit-aware) açısal yol çözümü
 - Çoklu hedef ortamında flip-flop önlemeli otomatik hedef seçimi
 - Katmanlı, tek-sorumluluklu modüler yazılım mimarisi (özellikle `ui/` altındaki alt paketler)
 - Gerçek zamanlı 2D/3D veri görselleştirme
