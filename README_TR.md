@@ -10,9 +10,11 @@ Sistem; bağımsız frekanslarda çalışan hedef/kontrol/aktüatör döngüleri
 - Çoklu hedef otomatik seçiminde cooldown + margin mekanizması, sentetik testte hedef değişim sayısını 300 tick üzerinde 300'den 2'ye düşürdü (flip-flop önleme).
 
 ## Demo
-
-[![Demo Video](https://img.youtube.com/vi/XFFDIRdZATw/0.jpg)](https://youtu.be/XFFDIRdZATw)
-
+ 
+[<img src="thumbnail.png" width="900" alt="Demo Video">](https://youtu.be/XFFDIRdZATw)
+ 
+*Sistemin çalışan halini görmek için görsele tıklayın (YouTube).*
+ 
 ## İçindekiler
 
 1. [Sonuçlar](#sonuçlar)
