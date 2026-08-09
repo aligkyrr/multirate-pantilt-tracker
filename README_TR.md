@@ -11,12 +11,7 @@ Sistem; bağımsız frekanslarda çalışan hedef/kontrol/aktüatör döngüleri
 
 ## Demo
 
-<video src="demo.mp4" controls width="720">
-  Tarayıcınız video etiketini desteklemiyor. Videoyu doğrudan görüntülemek için: demo.mp4
-</video>
-
-
----
+[![Demo Video](https://img.youtube.com/vi/XFFDIRdZATw/0.jpg)](https://youtu.be/XFFDIRdZATw)
 
 ## İçindekiler
 

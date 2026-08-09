@@ -11,11 +11,7 @@ The system includes independently-clocked target/control/actuator loops, PID con
 
 ## Demo
 
-<video src="demo.mp4" controls width="720">
-  Your browser does not support the video tag. View the video directly at: demo.mp4
-</video>
-
----
+[![Demo Video](https://img.youtube.com/vi/XFFDIRdZATw/0.jpg)](https://youtu.be/XFFDIRdZATw)
 
 ## Table of Contents
 
