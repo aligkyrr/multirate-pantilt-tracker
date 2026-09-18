@@ -6,7 +6,7 @@ Sistem; bağımsız frekanslarda çalışan hedef/kontrol/aktüatör döngüleri
 
 **Öne çıkan sonuçlar:**
 - Gürültülü konum ölçümü altında (σ = 0.15 m), Kalman tabanlı lead-prediction, finite-difference ekstrapolasyona göre RMSE'yi **%87.8–%97.2** oranında iyileştirdi.
-- ±185° sert azimuth limiti altında, hedef platformun arkasına geçtiğinde ortaya çıkan kalıcı lock-on kaybı, limit-aware açısal yol çözümü ile giderildi (2000 tick boyunca hiç kilitlenmeme → 351 tick ≈ 5.85 s'de kilitlenme, 60 Hz'de).
+- ±185° sert azimuth limiti altında, hedef platformun arkasına geçtiğinde ortaya çıkan kalıcı lock-on kaybı, limit-aware açısal yol çözümü ile giderildi (2000 tick boyunca hiç kilitlenmeme → 346 tick ≈ 5.8 s'de kilitlenme, 60 Hz'de; azimuth ivme limiti 2000 deg/s² iken).
 - Çoklu hedef otomatik seçiminde cooldown + margin mekanizması, sentetik testte hedef değişim sayısını 300 tick üzerinde 300'den 2'ye düşürdü (flip-flop önleme).
 
 ## Demo
@@ -99,10 +99,8 @@ Burada naif ekstrapolasyon hafifçe daha iyi — beklenen bir sonuç. Girdi zate
 | Döngü | Frekans | Sorumluluk |
 |---|---|---|
 | Hedef Güncelleme | 60 Hz | Hedef fiziği (OU-tipi smooth random walk, sınır sekmesi) |
-| Kontrol Döngüsü (PID) | 120 Hz | Açısal hata hesaplama, PID çıktısı üretimi |
-| Pan-Tilt Güncelleme | 60 Hz | Açı/hız/ivme entegrasyonu, aktüatör fiziği |
-
-Kontrol döngüsü, hedef/aktüatör güncellemesinin iki katı frekansta çalıştırılır; bu, kontrol komutlarının daha düşük örnekleme gecikmesiyle üretilmesini amaçlayan bir tasarım tercihidir.
+| Kontrol Döngüsü | 120 Hz | UI'daki PID kazançlarını kontrolcülere uygular |
+| Pan-Tilt Güncelleme | 60 Hz | Açısal hata hesaplama, PID çıktısı, açı/hız/ivme entegrasyonu, aktüatör fiziği |
 
 Zamanlama, sabit `dt` adımlarıyla ilerleyen bir accumulator modeliyle yürütülür (`DT_TARGET`, `DT_CONTROL`, `DT_PANTILT`). Pencere sürükleme veya GC duraklaması nedeniyle gerçek geçen süre anormal sıçrarsa, `MAX_DT = 0.1s` tavanı ve `MAX_CATCHUP_STEPS = 10` sınırı döngünün yetişmeye çalışırken kilitlenmesini (spiral-of-death) engeller. `ui/main_window/loop.py`, bu döngüyü Qt'nin olay döngüsüne (`QTimer`, `TICK_MS = 4`) bağlar — QTimer yalnızca UI/scheduler tetikleyicisi olarak kullanılır, gerçek simülasyon zaman adımları accumulator tarafından `DT_TARGET`, `DT_CONTROL` ve `DT_PANTILT` üzerinden bağımsız olarak yönetilir.
 
@@ -115,12 +113,12 @@ Not: bu bir masaüstü Python/PyQt uygulamasıdır ve donanım seviyesinde hard 
 ### PID Kontrolcü
 
 ```
-Kontrol döngüsü : 120 Hz
+Kontrol döngüsü : 60 Hz (PID, pan-tilt güncelleme adımının içinde çalışır)
 error            : derece
 integral         : derece·s
 derivative       : derece/s (alçak geçiren filtreden geçirilmiş, α = 0.25)
 output           : açısal hız komutu (angular velocity command)
-output limit     : ±2.0 deg/tick = ±240 deg/s @ 120 Hz (PID_OUTPUT_LIMIT)
+output limit     : ±2.0 deg/tick = ±120 deg/s @ 60 Hz (PID_OUTPUT_LIMIT)
 
 PID_KP = 0.34   PID_KI = 0.015   PID_KD = 0.060
 PID_INTEGRAL_LIMIT = 12.0   (anti-windup)
@@ -187,14 +185,17 @@ Parametreler, `HARDWARE_MENU_SCHEMA`'dan otomatik üretilen bir PyQt5 panelinden
 
 **Çözüm:** `PanTiltTracker._resolve_az_error()`, hedef açının `±360°` eşdeğerleri arasından, sert limit içinde kalan ve mevcut konuma en yakın olanı seçer — gerektiğinde bu, kısa yol yerine daha uzun ama fiilen ulaşılabilir yoldan gitmek anlamına gelir.
 
-**Sonuç** — `PanTiltDeviceSimulator` ile uçtan uca, `DT_PANTILT` adımında azami 2000 tick:
+**Sonuç** — `PanTiltDeviceSimulator` ile uçtan uca simülasyon (donanım gerçekçilik katmanı açık, varsayılan donanım profili; tek fark azimuth/elevation ivme limitinin 2000 deg/s² olması). Platform +170°'de başlar, hedef -170° azimuth'ta (8 m uzakta) sabittir, `DT_PANTILT` adımında 2000 tick, farklı rastgele seed'lerle 10 çalıştırma:
 
 | | Düzeltme öncesi (naif ±180°) | Düzeltme sonrası (`_resolve_az_error`) |
 |---|---|---|
-| Hedefe kilitlenme | ❌ hiçbir zaman (2000 tick) | ✅ 351 tick (~5.85 s) |
-| Son azimuth | 184.97° (sert limitte asılı) | -167.41° |
-| Son gerçek açısal hata | 5.03° (kalıcı) | 2.59° (lock eşiği bandında) |
-| Görülen en küçük hata | 5.01° | 0.20° |
+| Hedefe kilitlenme | Hayır (10 çalıştırmanın 0'ı, 2000 tick) | Evet (10 çalıştırmanın 10'u, tick 346 ≈ 5.8 s, 60 Hz'de) |
+| Son azimuth | 185.0° (sert limitte asılı) | ≈ -169.7° |
+| Son gerçek açısal hata | 5.0° (kalıcı) | 0.3–0.4° |
+
+Karşılaştırma için: 60 deg/s azimuth hız limitinde 340°'lik bir dönüş yaklaşık 5.7 s sürer; dolayısıyla kilitlenme süresi kinematik alt sınıra yakındır.
+
+> **Not:** Varsayılan ivme limitinde (150 deg/s²) yol çözümü yine doğru 340°'lik rotayı seçer, ancak COARSE mod hedefi aşar ve etrafında yaklaşık ±11° salınır; kararlı kilitlenme çalıştırmaların yalnızca küçük bir kısmında (30'da yaklaşık 4) elde edilmiştir. Donanım katmanı açıkken COARSE moddaki komut, fren mesafesine göre sınırlandırılmamaktadır. Bkz. [Sınırlamalar](#sınırlamalar).
 
 ---
 
@@ -236,6 +237,7 @@ python main.py
 
 - Fiziksel servo donanımı üzerinde doğrulanmamıştır; `pantilt_hardware.py` gerçek bir datasheet'e değil, parametrik varsayımlara dayanır.
 - Hedef ölçümü şu an ground-truth veya sentetik Gaussian gürültü ile modellenmektedir; kamera/görüntü pipeline'ı henüz entegre edilmemiştir. Kalman filtresi henüz gerçek bir görüntü dedektörünün çıktısıyla doğrulanmamıştır — noisy-measurement benchmark'ı sentetik gürültü kullanır, gerçek YOLO çıktısı değildir.
+- Varsayılan ivme limitinde (150 deg/s²) ve donanım katmanı açıkken, çok büyük bir başlangıç hatasından sonra (örneğin limit-aware senaryosunda) COARSE mod hedefi aşıp etrafında salınır; kararlı kilitlenme güvenilir şekilde elde edilemez. Donanım yolundaki hız komutuna fren mesafesi sınırı eklenmesi bilinen açık bir maddedir.
 - Python/PyQt + QTimer mimarisi soft real-time'dır; hard real-time zamanlama garantisi vermez.
 - PID katsayıları belirli hedef profilleri üzerinde deneysel olarak ayarlanmıştır; farklı dinamiklere sahip hedefler için yeniden ayar gerekebilir.
 

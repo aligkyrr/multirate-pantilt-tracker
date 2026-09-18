@@ -6,7 +6,7 @@ The system includes independently-clocked target/control/actuator loops, PID con
 
 **Highlighted results:**
 - Under noisy position measurement (σ = 0.15 m), Kalman-based lead prediction improved RMSE by **87.8–97.2%** over finite-difference extrapolation.
-- Under a hard ±185° azimuth limit, a persistent lock-on failure that occurs when the target crosses behind the platform was fixed with a limit-aware angular path resolution (never locked over 2000 ticks → locked in 351 ticks ≈ 5.85 s at 60 Hz).
+- Under a hard ±185° azimuth limit, a persistent lock-on failure that occurs when the target crosses behind the platform was fixed with a limit-aware angular path resolution (never locked over 2000 ticks → locked in 346 ticks ≈ 5.8 s at 60 Hz, with the azimuth acceleration limit set to 2000 deg/s²).
 - A cooldown + margin mechanism in multi-target auto-selection reduced target switches from 300 to 2 over 300 ticks in a synthetic test (flip-flop prevention).
 
 ## Demo
@@ -99,10 +99,8 @@ The `core` layer has no dependency on `ui` — control/simulation logic can be u
 | Loop | Frequency | Responsibility |
 |---|---|---|
 | Target update | 60 Hz | Target physics (OU-type smooth random walk, boundary bounce) |
-| Control loop (PID) | 120 Hz | Angular error computation, PID output generation |
-| Pan-tilt update | 60 Hz | Angle/velocity/acceleration integration, actuator physics |
-
-The control loop runs at twice the frequency of the target/actuator updates; this is a design choice aimed at producing control commands with lower sampling latency.
+| Control loop | 120 Hz | Applies the PID gains from the UI to the controllers |
+| Pan-tilt update | 60 Hz | Angular error computation, PID output, angle/velocity/acceleration integration, actuator physics |
 
 Timing is executed with a fixed-`dt` accumulator model (`DT_TARGET`, `DT_CONTROL`, `DT_PANTILT`). If wall-clock elapsed time spikes abnormally due to window dragging or a GC pause, a `MAX_DT = 0.1s` ceiling and a `MAX_CATCHUP_STEPS = 10` limit prevent the loop from locking up while trying to catch up (spiral-of-death). `ui/main_window/loop.py` ties this loop to Qt's event loop (`QTimer`, `TICK_MS = 4`) — QTimer is used purely as a UI/scheduler trigger; the actual simulation time steps are managed independently by the accumulator via `DT_TARGET`, `DT_CONTROL`, and `DT_PANTILT`.
 
@@ -115,12 +113,12 @@ Note: this is a desktop Python/PyQt application and does not provide hardware-le
 ### PID Controller
 
 ```
-Control loop     : 120 Hz
+Control loop     : 60 Hz (the PID runs inside the pan-tilt update step)
 error             : degrees
 integral          : degree·s
 derivative        : degrees/s (low-pass filtered, α = 0.25)
 output            : angular velocity command
-output limit      : ±2.0 deg/tick = ±240 deg/s @ 120 Hz (PID_OUTPUT_LIMIT)
+output limit      : ±2.0 deg/tick = ±120 deg/s @ 60 Hz (PID_OUTPUT_LIMIT)
 
 PID_KP = 0.34   PID_KI = 0.015   PID_KD = 0.060
 PID_INTEGRAL_LIMIT = 12.0   (anti-windup)
@@ -187,14 +185,17 @@ Parameters can be adjusted at runtime, grouped by category, via a PyQt5 panel au
 
 **Solution:** `PanTiltTracker._resolve_az_error()` selects, among the target angle's `±360°` equivalents, the one that stays within the hard limit and is closest to the current position — which, when needed, means taking the longer but actually reachable path instead of the shortest one.
 
-**Result** — simulated end-to-end with `PanTiltDeviceSimulator`, up to 2000 ticks at the `DT_PANTILT` step:
+**Result** — simulated end-to-end with `PanTiltDeviceSimulator` (hardware realism layer enabled, default hardware profile except that the azimuth/elevation acceleration limit is set to 2000 deg/s²). The platform starts at +170°, the target is static at -170° azimuth (8 m away), 2000 ticks at the `DT_PANTILT` step, 10 runs with different random seeds:
 
 | | Before fix (naive ±180°) | After fix (`_resolve_az_error`) |
 |---|---|---|
-| Target lock achieved | ❌ never (over 2000 ticks) | ✅ 351 ticks (≈5.85 s at 60 Hz) |
-| Final azimuth | 184.97° (stuck at hard limit) | -167.41° |
-| Final true angular error | 5.03° (persistent) | 2.59° (within lock-threshold band) |
-| Smallest error observed | 5.01° | 0.20° |
+| Target lock achieved | No (0 of 10 runs, 2000 ticks) | Yes (10 of 10 runs, at tick 346 ≈ 5.8 s at 60 Hz) |
+| Final azimuth | 185.0° (stuck at hard limit) | ≈ -169.7° |
+| Final true angular error | 5.0° (persistent) | 0.3–0.4° |
+
+For reference, a 340° rotation at the 60 deg/s azimuth speed limit takes about 5.7 s, so the lock time is close to the kinematic minimum.
+
+> **Note:** With the default acceleration limit (150 deg/s²), the path resolution still selects the correct 340° route, but the COARSE mode overshoots the target and oscillates by about ±11° around it, and stable lock was reached in only a small minority of runs (about 4 of 30). The command in COARSE mode is not limited by braking distance when the hardware layer is enabled. See [Limitations](#limitations).
 
 ---
 
@@ -236,6 +237,7 @@ python main.py
 
 - Not validated on physical servo hardware; `pantilt_hardware.py` is based on parametric assumptions rather than a real datasheet.
 - Target measurement is currently modeled with ground-truth or synthetic Gaussian noise; a camera/image pipeline is not yet integrated. The Kalman filter has not yet been validated against real image-detector output — the noisy-measurement benchmark uses synthetic noise, not actual YOLO output.
+- With the default acceleration limit (150 deg/s²) and the hardware layer enabled, the COARSE mode overshoots and oscillates around the target after a very large initial error (for example, the limit-aware scenario); stable lock is not reliably achieved. A braking-distance limit on the velocity command in the hardware path is a known open item.
 - The Python/PyQt + QTimer architecture is soft real-time; it does not provide hard real-time timing guarantees.
 - PID coefficients were tuned experimentally on specific target profiles; re-tuning may be required for targets with different dynamics.
 
