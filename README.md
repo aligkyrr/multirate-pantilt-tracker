@@ -17,8 +17,8 @@ The system includes independently-clocked target/control/actuator loops, PID con
 
 ## Table of Contents
 
-1. [Results](#results)
-2. [Demo](#demo)
+1. [Demo](#demo)
+2. [Results](#results)
 3. [System Architecture](#system-architecture)
 4. [Multi-Rate Loop Design](#multi-rate-loop-design)
 5. [Tracking and Control](#tracking-and-control)
@@ -99,10 +99,11 @@ The `core` layer has no dependency on `ui` — control/simulation logic can be u
 | Loop | Frequency | Responsibility |
 |---|---|---|
 | Target update | 60 Hz | Target physics (OU-type smooth random walk, boundary bounce) |
-| Control loop | 120 Hz | Applies the PID gains from the UI to the controllers |
-| Pan-tilt update | 60 Hz | Angular error computation, PID output, angle/velocity/acceleration integration, actuator physics |
+| Control loop | 120 Hz | Reads PID gains from the UI and updates the PID controller parameters |
+| Pan-tilt update | 60 Hz | Computes angular error, runs the PID controllers, and updates pan-tilt state |
 
-Timing is executed with a fixed-`dt` accumulator model (`DT_TARGET`, `DT_CONTROL`, `DT_PANTILT`). If wall-clock elapsed time spikes abnormally due to window dragging or a GC pause, a `MAX_DT = 0.1s` ceiling and a `MAX_CATCHUP_STEPS = 10` limit prevent the loop from locking up while trying to catch up (spiral-of-death). `ui/main_window/loop.py` ties this loop to Qt's event loop (`QTimer`, `TICK_MS = 4`) — QTimer is used purely as a UI/scheduler trigger; the actual simulation time steps are managed independently by the accumulator via `DT_TARGET`, `DT_CONTROL`, and `DT_PANTILT`.
+
+Timing is executed with a fixed-`dt` accumulator model (`DT_TARGET`, `DT_CONTROL`, `DT_PANTILT`). If wall-clock elapsed time spikes abnormally due to window dragging or a GC pause, a `MAX_DT = 0.1s` ceiling and a `MAX_CATCHUP_STEPS = 10` limit prevent the loop from locking up while trying to catch up (spiral-of-death). `ui/main_window/loop.py` ties this loop to Qt's event loop (`QTimer`, `TICK_MS = 4`) — QTimer is used as a UI/scheduler trigger; the actual simulation time steps are managed independently by accumulators using `DT_TARGET`, `DT_CONTROL`, and `DT_PANTILT`.
 
 Note: this is a desktop Python/PyQt application and does not provide hardware-level hard real-time guarantees; the mechanisms above are intended to preserve the timing discipline of a soft real-time simulation loop.
 
@@ -113,12 +114,14 @@ Note: this is a desktop Python/PyQt application and does not provide hardware-le
 ### PID Controller
 
 ```
-Control loop     : 60 Hz (the PID runs inside the pan-tilt update step)
+PID execution     : 60 Hz (the PID runs inside the pan-tilt update step)
+Parameter update  : 120 Hz (PID gains are read from the UI and applied to both controllers)
 error             : degrees
 integral          : degree·s
-derivative        : degrees/s (low-pass filtered, α = 0.25)
+derivative        : error rate per second (low-pass filtered, α = 0.25)
 output            : angular velocity command
-output limit      : ±2.0 deg/tick = ±120 deg/s @ 60 Hz (PID_OUTPUT_LIMIT)
+output limit      : ±2.0 deg/tick (interpreted by the tracker/actuator as a velocity command)
+
 
 PID_KP = 0.34   PID_KI = 0.015   PID_KD = 0.060
 PID_INTEGRAL_LIMIT = 12.0   (anti-windup)
@@ -139,7 +142,7 @@ The coefficients were tuned experimentally on the simulation based on the tracki
 Switching modes on a single threshold causes mode chatter every tick when the error oscillates around that threshold. This is prevented with two mechanisms:
 
 1. **Hysteresis (Schmitt-trigger logic):** the exit threshold is kept higher than the entry threshold (`COARSE_REENTRY = 4.0°`, `LOCK_EXIT = 2.16°`)
-2. **Debounce:** a state change (mode or lock) becomes permanent only once the new state persists for `MODE_SWITCH_CONFIRM_TICKS = 6` (~96 ms) consecutive ticks
+2. **Debounce:** a state change (mode or lock) becomes permanent only once the new state persists for `MODE_SWITCH_CONFIRM_TICKS = 6` (~100 ms at 60 Hz) consecutive ticks
 
 Hysteresis and consecutive-tick confirmation are used together to prevent small target movements around a threshold from causing unnecessary mode switches.
 
@@ -160,22 +163,30 @@ Each `Target` carries its own filter; process noise (`q_vel`) is scaled per targ
 
 ## Actuator / Hardware Realism Layer
 
-`core/pantilt_hardware.py` is an independent layer built on top of the ideal angle/velocity/acceleration integration, modeling physical and communication constraints one would encounter in a real servo system — it has no dependency on `simulator.py` or `target.py`, and can be toggled at runtime (when disabled, the system behaves identically to before this layer existed).
+`core/pantilt_hardware.py` is an independent hardware-realism layer that models physical and communication constraints of a pan-tilt/servo device. It is intentionally independent from `simulator.py` and `target.py` and can be enabled or disabled without changing the rest of the simulation architecture.
+
+The layer keeps two position representations separate:
+
+- `true_position_deg`: the simulator's internal physical position.
+- `read_position_deg()`: the position reported by the simulated device after accuracy bias, repeatability noise, and angular-resolution quantization.
+
+The control/telemetry side is intended to consume the reported position rather than the internal true position.
 
 | Model | Purpose |
 |---|---|
-| Speed envelope | No motion below `MIN_SPEED` due to stiction, `MAX_SPEED` as the upper ceiling |
-| Hard limit | Hard stop at `±185°` on the azimuth axis (to prevent cable entanglement) |
-| Acceleration limit | Limits sudden velocity changes (when the hardware layer is enabled, the tracker's own acceleration limiter is disabled) |
-| Command rate | Communication capacity constraint: the device does not accept commands faster than `COMM_MAX_COMMAND_RATE_HZ = 50 Hz`; intermediate commands are dropped |
-| Velocity ripple | Small random fluctuation from the device's own internal controller (OU-type noise) |
-| Angular resolution | Quantization to encoder/step resolution |
-| Accuracy / repeatability | Accuracy: a fixed calibration bias per session. Repeatability: a random component re-drawn on each reading, representing repeated-positioning error (a simplified representation of mechanical effects such as backlash) |
-| Settling time | The axis is considered "settled" once its velocity reaches zero and it remains within `SETTLING_BAND_DEG` continuously for `SETTLING_TIME_SEC` |
+| Speed envelope | Commanded velocity is clamped to the configured maximum speed; non-zero commands below the minimum-speed threshold are treated as stiction/deadband and result in zero commanded velocity |
+| Hard limit | Optional hard positional limits; azimuth defaults to `±185°` |
+| Acceleration limit | Limits how quickly the physical velocity can change |
+| Command rate | The device accepts commands only up to `COMM_MAX_COMMAND_RATE_HZ = 50 Hz`; excess commands are dropped and the previous command remains active |
+| Velocity ripple | Smooth bounded random fluctuation added to the physical velocity to model internal drive/control imperfections |
+| Angular resolution | Reported position is quantized to the configured encoder/step resolution |
+| Accuracy | A fixed random calibration bias is applied for the lifetime of the simulated device |
+| Repeatability | A new random positioning error is sampled on every position read |
+| Settling time | The axis is considered "settled" when the commanded velocity is zero and the applied velocity remains within the configured settling-band-derived threshold continuously for `SETTLING_TIME_SEC` |
 
-Two notions of position are kept separate: `true_position_deg` is the simulation's internal true physical position, while `read_position_deg()` is what the device reports externally (with resolution + accuracy + repeatability error applied) — the UI/telemetry/control loop always reads the latter.
+The communication-rate model is intentionally separate from the physical update rate: commands may be generated at 120 Hz while the simulated device accepts them at a lower configured rate. Dropped commands do not stop the actuator; the last accepted velocity command continues to be applied until another command is accepted.
 
-Parameters can be adjusted at runtime, grouped by category, via a PyQt5 panel auto-generated from `HARDWARE_MENU_SCHEMA` (`hardware_panel.py`).
+Parameters can be adjusted at runtime through the PyQt5 hardware panel generated from `HARDWARE_MENU_SCHEMA` (`hardware_panel.py`).
 
 ---
 
@@ -185,7 +196,7 @@ Parameters can be adjusted at runtime, grouped by category, via a PyQt5 panel au
 
 **Solution:** `PanTiltTracker._resolve_az_error()` selects, among the target angle's `±360°` equivalents, the one that stays within the hard limit and is closest to the current position — which, when needed, means taking the longer but actually reachable path instead of the shortest one.
 
-**Result** — simulated end-to-end with `PanTiltDeviceSimulator` (hardware realism layer enabled, default hardware profile except that the azimuth/elevation acceleration limit is set to 2000 deg/s²). The platform starts at +170°, the target is static at -170° azimuth (8 m away), 2000 ticks at the `DT_PANTILT` step, 10 runs with different random seeds:
+**Result** — simulated end-to-end with `PanTiltDeviceSimulator` and the hardware realism layer enabled for the test. The default hardware parameters were used except that the azimuth/elevation acceleration limit was increased from 150 to 2000 deg/s². The platform starts at +170°, the target is static at -170° azimuth (8 m away), 2000 ticks at the `DT_PANTILT` step, 10 runs with different random seeds:
 
 | | Before fix (naive ±180°) | After fix (`_resolve_az_error`) |
 |---|---|---|
@@ -235,7 +246,7 @@ python main.py
 
 ## Limitations
 
-- Not validated on physical servo hardware; `pantilt_hardware.py` is based on parametric assumptions rather than a real datasheet.
+- Not validated on physical servo hardware; pantilt_hardware.py uses configurable parametric models for speed, acceleration, communication rate, ripple, encoder resolution, accuracy, repeatability, and settling behavior rather than measurements from a specific commercial actuator.
 - Target measurement is currently modeled with ground-truth or synthetic Gaussian noise; a camera/image pipeline is not yet integrated. The Kalman filter has not yet been validated against real image-detector output — the noisy-measurement benchmark uses synthetic noise, not actual YOLO output.
 - With the default acceleration limit (150 deg/s²) and the hardware layer enabled, the COARSE mode overshoots and oscillates around the target after a very large initial error (for example, the limit-aware scenario); stable lock is not reliably achieved. A braking-distance limit on the velocity command in the hardware path is a known open item.
 - The Python/PyQt + QTimer architecture is soft real-time; it does not provide hard real-time timing guarantees.
